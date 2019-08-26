@@ -15,30 +15,15 @@ class TransFace(object):
         self.deeplab = Segmentation()
         self.G = Generator(c_dim=self.c_dim)
         self.G.to(self.device)
-        #self.C = Classification(c_dim=self.c_dim)
-        #self.C.to(self.device)
         self.restore_model()
-
-    def classification(self, image):
-        image = pil_to_tensor(image)
-        with torch.no_grad():
-            out_cls = self.C(image)
-            out_cls = out_cls.view(out_cls.size(1))
-
-            out_cls[out_cls < 0.5] = 0
-            out_cls[out_cls >= 0.5] = 1
-            return out_cls
+        self.face_data = []
 
     def merge_img(self, img_org, img_trans, img_mask):
         img_mask = np.where(img_mask == 0, img_org, img_trans)
         return cv2_to_pil(img_mask)
 
-    def trans(self, img, c_trg=None):
-        if c_trg is None:
-            c_trg = [0, 1, 0, 1, 1]
-        c_trg = np.asarray(c_trg, dtype=np.float32)
-        c_trg = torch.from_numpy(c_trg)
-        c_trg = c_trg.view(1, c_trg.size(0)).to(self.device)
+    def cut_face(self, img):
+        self.clear_faces()
         img = img.convert("RGB")
         img_gray = np.asarray(img)
         img_gray = cv2.cvtColor(img_gray, cv2.COLOR_RGB2GRAY)
@@ -50,18 +35,38 @@ class TransFace(object):
             # 顔画像のcrop
             start_x = rect[0] - rect[2]//2
             start_y = rect[1] - rect[3]//2
-            img3 = img.crop((start_x, start_y, rect[0] + rect[2] + rect[2]//2, rect[1] + rect[3] + rect[3]//2))
-            # 顔の変換
-            face_img = self.trans_face(pil_to_tensor(img3), c_trg).resize((2 * rect[2], 2 * rect[3]), Image.LANCZOS)
+            end_x = rect[0] + rect[2] + rect[2]//2
+            end_y = rect[1] + rect[3] + rect[3]//2
+            img3 = img.crop((start_x, start_y, end_x, end_y))
+            self.face_data.append([start_x, start_y, end_x, end_y, img3])
 
-            # 背景切り取り
-            cut_img = self.deeplab.validation(img3)
-            cut_img = cv2.resize(cut_img, (2 * rect[2], 2 * rect[3]), interpolation=cv2.INTER_NEAREST)
-            # 合成
-            face_img = self.merge_img(pil_to_cv2(img3.resize((2 * rect[2], 2 * rect[3]))), pil_to_cv2(face_img), cut_img)
-            img.paste(face_img, (start_x, start_y))
+    def translation(self, img, c_trg=None):
+        if c_trg is None:
+            c_trg = [0, 1, 0, 1, 1]
+        c_trg = np.asarray(c_trg, dtype=np.float32)
+        c_trg = torch.from_numpy(c_trg)
+        c_trg = c_trg.view(1, c_trg.size(0)).to(self.device)
+        h, w = img.size
+        img_size = (2 * h, 2 * w)
 
-        return pil_to_cv2(img)
+        # 顔の変換
+        face_img = self.trans_face(pil_to_tensor(img), c_trg).resize(img_size, Image.LANCZOS)
+
+        # 背景切り取り
+        cut_img = self.deeplab.validation(img)
+        cut_img = cv2.resize(cut_img, img_size, interpolation=cv2.INTER_NEAREST)
+        # 合成
+        return self.merge_img(pil_to_cv2(img.resize(img_size)), pil_to_cv2(face_img), cut_img)
+
+    def merge_bg(self, img_bg, face_img, face_data):
+        img_bg.paste(face_img, (face_data[0], face_data[1]))
+        return img_bg
+
+    def get_faces(self):
+        return self.face_data
+
+    def clear_faces(self):
+        self.face_data.clear()
 
     def restore_model(self):
         self.G.load_state_dict(torch.load("./models/generator_5.ckpt", map_location=lambda storage, loc: storage))
